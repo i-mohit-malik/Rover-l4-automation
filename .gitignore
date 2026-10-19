@@ -1,0 +1,32 @@
+# ---- Arduino / build output -------------------------------------------------
+build/
+.arduino-build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# ---- Python (tools/) ----------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ---- Editors / OS -------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Per-developer overrides (never commit) -----------------------------------
+*.local.*
+local.env
+
+# ---- Logs, zips and reference material live outside the repo (docs/project_folder.md)
+*.zip
+*.pdf
+*.pptx
+*.png

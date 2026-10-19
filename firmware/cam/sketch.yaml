@@ -1,0 +1,11 @@
+# arduino-cli build profile for the ESP32-CAM sketch.
+# Usage:  arduino-cli compile --profile cam firmware/cam
+profiles:
+  cam:
+    fqbn: esp32:esp32:esp32cam
+    platforms:
+      - platform: esp32:esp32 (3.3.1)
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries: []
+
+default_profile: cam

@@ -1,0 +1,18 @@
+# LF in the repository, native line endings on checkout
+* text=auto eol=lf
+*.ino text
+*.cpp text
+*.h   text
+*.py  text
+*.md  text
+*.csv text
+*.yaml text
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binaries
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.bin  binary
+*.zip  binary
