@@ -6,7 +6,7 @@
 // All network I/O runs in an own FreeRTOS task on core 0, so loop() never waits for the rover.
 //
 //   rover.begin();
-//   rover.setDrive(l, r);  // call every loop pass; the task sends it every 100 ms ("T":1)
+//   roverLink.setDrive(driveLeft, driveRight);  // call every loop pass; the task sends it every 100 ms ("T":1)
 //
 // When l = r = 0 the task sends stops until the rover confirmed three of them, then every
 // 500 ms alternately repeats the stop and polls the rover status ("T":130, battery voltage).
@@ -21,28 +21,28 @@ public:
   // Wheel speeds per side, -0.5..0.5 (0.5 = full speed). Thread-safe.
   void setDrive(float left, float right);
 
-  bool connected() const { return _ipRaw != 0; }
-  IPAddress ip() const { return IPAddress(_ipRaw); }   // 0.0.0.0 while searching
+  bool connected() const { return _roverIp != 0; }
+  IPAddress ip() const { return IPAddress(_roverIp); }   // 0.0.0.0 while searching
   float voltage() const { return _voltage; }           // rover battery in V, 0 = unknown
   float rttMs() const { return _rttMs; }               // smoothed round-trip time per command
-  uint32_t okCount() const { return _ok; }             // successful commands since start
-  uint32_t failCount() const { return _fail; }         // failed commands since start
+  uint32_t okCount() const { return _okCount; }             // successful commands since start
+  uint32_t failCount() const { return _failCount; }         // failed commands since start
   String statusText() const;                           // one line for the web page
 
 private:
   static void _taskEntry(void* self);
   void _task();
   bool _find();
-  int _cmd(uint32_t ip, const String& json, String* reply);
+  int _sendCommand(uint32_t roverIp, const String& json, String* reply);
 
   uint32_t _periodMs = 100;
-  portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;  // guards the set point
-  float _setL = 0, _setR = 0;
-  uint32_t _setMs = 0;
+  portMUX_TYPE _setPointMux = portMUX_INITIALIZER_UNLOCKED;  // guards the set point
+  float _setLeft = 0, _setRight = 0;
+  uint32_t _setTimeMs = 0;
 
   // written by the task, read by loop(); 32-bit values are atomic on the ESP32
-  volatile uint32_t _ipRaw = 0;
+  volatile uint32_t _roverIp = 0;
   volatile float _voltage = 0, _rttMs = 0;
-  volatile uint32_t _ok = 0, _fail = 0;
-  uint8_t _failRow = 0;  // task only
+  volatile uint32_t _okCount = 0, _failCount = 0;
+  uint8_t _failsInRow = 0;  // task only
 };

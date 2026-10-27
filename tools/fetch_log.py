@@ -5,7 +5,8 @@
     python tools/fetch_log.py --box 6 --out D:/somewhere/else
 
 The laptop must be on the box Wi-Fi (CAS-Box-NN). Uses the /log endpoints described in
-docs/logging.md; until the Logger exists on the box this script reports the missing endpoint.
+docs/logging.md. The box writes one run_<n>.csv per boot and per START RUN; "newest" is the
+highest n.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ def main() -> None:
         names = re.findall(r"run_\d+\.csv", r.text)
         if not names:
             sys.exit("no log files on the box")
-        name = sorted(names)[-1]
+        name = max(names, key=lambda n: int(re.search(r"\d+", n).group()))  # run_10 after run_9
 
     data = requests.get(f"{base}/log", params={"get": name}, timeout=30)
     data.raise_for_status()

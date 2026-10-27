@@ -30,8 +30,9 @@ Drive logs go to `04_SAFETY_AND_TESTING/Test_Results/`, the submission zip to
 2. Open `firmware/box/box.ino`, set `BOX_ID` in [`firmware/box/src/core/Config.h`](firmware/box/src/core/Config.h)
    to the kit number, choose board *ESP32 Dev Module*, upload.
 3. Switch on the box first, then the rover. Phone joins `CAS-Box-NN`, opens `http://192.168.(10+N).1`.
-4. Drive with the pad. The box writes a timeline log; afterwards fetch and plot it with the
-   scripts in `tools/` (see [docs/logging.md](docs/logging.md)).
+4. Drive with the pad, or press **Start run** for the autonomous run along the pole row
+   ([docs/autonomous_run.md](docs/autonomous_run.md)). The box writes a timeline log; afterwards
+   fetch and plot it with the scripts in `tools/` (see [docs/logging.md](docs/logging.md)).
 
 ## Rules that bind this repo
 

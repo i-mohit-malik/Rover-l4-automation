@@ -9,7 +9,7 @@ GET http://<rover-ip>/js?json=<url-encoded JSON>
 ```
 
 `firmware/box/src/comms/RoverLink.*` wraps this. Application code never builds HTTP itself; it calls
-`rover.setDrive(l, r)` once per loop pass.
+`roverLink.setDrive(driveLeft, driveRight)` once per loop pass.
 
 ## Commands the starter program uses
 
@@ -41,7 +41,7 @@ Everything is differential drive from `L` and `R`:
 There is **no feedback** from the rover about distance driven or angle turned (no odometry
 over this link). Turning "by 90°" therefore has to be closed on the **box IMU yaw**
 (`sensors` → `ImuManager::yawDeg()`), and distances on time × speed or LiDAR/ultrasonic.
-Low battery (3× 18650) makes the rover unable to turn: check `rover.voltage()` before a run.
+Low battery (3× 18650) makes the rover unable to turn: check `roverLink.voltage()` before a run.
 
 ## Safety chain (must stay)
 

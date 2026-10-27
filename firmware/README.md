@@ -16,10 +16,13 @@ compiled with it. Only root-level files open as IDE tabs; edit `src/` files in V
 box/
 ├── box.ino          setup(), loop()
 ├── sketch.yaml      arduino-cli build profile
+├── VARIABLES.md     naming rules and every setting / variable with unit and meaning
 └── src/
     ├── core/        Config.h, Logger.*
     ├── sensors/     Sensors.*, UsManager.*, ImuManager.*, GpsManager.*, LidarScan.h
     ├── comms/       RoverLink.*, WebHMI.*
+    ├── nav/         autonomous run: NavConfig.h, Navigator.*, LineTracker.*, SafetyMonitor.*,
+    │                Perception.*, NavMath.*  (docs/autonomous_run.md)
     └── display/     DisplayManager.*
 ```
 
@@ -51,7 +54,8 @@ Library Manager names and the versions the starter program was tested with:
 | Adafruit BusIO | 1.17.4 | I2C helpers |
 | TinyGPSPlus-ESP32 (Mikal Hart) | 0.0.2 | GpsManager |
 
-WiFi, HTTPClient, Wire, SPI and LittleFS come with the esp32 core.
+WiFi, HTTPClient, Wire, SPI, LittleFS (timeline log), Preferences (saved IMU calibration) and
+Update (firmware update over Wi-Fi) come with the esp32 core: no extra library for them.
 Each sketch carries a `sketch.yaml` build profile, so once `arduino-cli` is installed the
 build is reproducible without clicking through the IDE:
 
@@ -66,9 +70,24 @@ Only the esp32 core (`esp_camera.h`) so far. Add rows here when the sketch grows
 ## Flash procedure (box)
 
 1. `box/src/core/Config.h` → `BOX_ID` = kit number on the sticker. Change nothing else of the naming scheme.
+   Set `FW_VERSION` to something new: the page shows it, so you can see which version runs.
 2. Board *ESP32 Dev Module*, partition *default*, port = COM port of the box.
 3. Upload, open the serial monitor at 115200. A `[sys]` status line appears every 10 s.
 4. On the field: power the **box first, then the rover**.
+
+### Update over Wi-Fi (no USB)
+
+1. Arduino IDE: *Sketch → Export Compiled Binary*. It writes `box/build/esp32.esp32.esp32/box.ino.bin`
+   (`build/` and `*.bin` are git-ignored).
+2. Phone or laptop on `CAS-Box-NN`, page → "update over Wi-Fi" (`/update`), choose
+   **`box.ino.bin`** (not `.merged.bin` / `.bootloader.bin`), upload. Not possible during a run.
+3. The box stops the rover, restarts with the new firmware after ~10 s (after a failed upload
+   it restarts with the old one). The log files and the saved IMU calibration stay.
+
+This needs the *default* partition scheme (two 1.25 MB app slots, 1.4 MB LittleFS). The
+box sketch is 1.23 MB = 93 % of one slot (core 3.3.12, 26.10.2026), so room is short: if a build
+ever reports "Sketch too big", do not switch to a scheme without OTA or with a smaller LittleFS
+without updating docs/logging.md.
 
 ## Flash procedure (cam)
 

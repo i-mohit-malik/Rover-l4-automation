@@ -21,5 +21,5 @@ public:
   uint32_t charsReceived();    // NMEA characters received since start
 
 private:
-  TinyGPSPlus _gps;
+  TinyGPSPlus _parser;
 };

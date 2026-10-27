@@ -28,18 +28,18 @@ public:
   // Builds the CRC table, so feed() works even without begin().
   LidarScan() {
     for (int i = 0; i < 256; i++) {  // CRC8, poly 0x4D (LD20 protocol)
-      uint8_t c = i;
-      for (int b = 0; b < 8; b++) c = (c & 0x80) ? (c << 1) ^ 0x4D : c << 1;
-      _crcTab[i] = c;
+      uint8_t crc = i;
+      for (int bit = 0; bit < 8; bit++) crc = (crc & 0x80) ? (crc << 1) ^ 0x4D : crc << 1;
+      _crcTable[i] = crc;
     }
   }
 
   // Opens the UART. Use Serial1 (Serial2 is the GPS).
   void begin(HardwareSerial& port, const Config& cfg) {
-    _cfg = cfg;
+    _config = cfg;
     _port = &port;
     _port->setRxBufferSize(4096);  // ~23 kB/s: survive slow loop passes
-    _port->begin(_cfg.baud, SERIAL_8N1, _cfg.rxPin, _cfg.txPin);
+    _port->begin(_config.baud, SERIAL_8N1, _config.rxPin, _config.txPin);
   }
 
   void update() {  // drain the UART, call every loop pass
@@ -48,72 +48,72 @@ public:
   }
 
   // Frame parser, one byte at a time. Valid frames go into the distance map.
-  void feed(uint8_t c) {
-    if (_idx == 0 && c != 0x54) return;  // wait for header
-    if (_idx == 1 && c != 0x2C) {        // second byte must be ver_len
-      _idx = (c == 0x54) ? 1 : 0;        // ...unless this byte is the next header
+  void feed(uint8_t byteIn) {
+    if (_frameIndex == 0 && byteIn != 0x54) return;  // wait for header
+    if (_frameIndex == 1 && byteIn != 0x2C) {        // second byte must be ver_len
+      _frameIndex = (byteIn == 0x54) ? 1 : 0;        // ...unless this byte is the next header
       return;
     }
-    _buf[_idx++] = c;
-    if (_idx < sizeof(Frame)) return;
-    _idx = 0;
+    _frameBuffer[_frameIndex++] = byteIn;
+    if (_frameIndex < sizeof(Frame)) return;
+    _frameIndex = 0;
     uint8_t crc = 0;
-    for (size_t i = 0; i < sizeof(Frame) - 1; i++) crc = _crcTab[crc ^ _buf[i]];
-    if (crc != _buf[sizeof(Frame) - 1]) { _crcErrors++; return; }
-    _packets++;
-    _handle(reinterpret_cast<const Frame*>(_buf));
+    for (size_t i = 0; i < sizeof(Frame) - 1; i++) crc = _crcTable[crc ^ _frameBuffer[i]];
+    if (crc != _frameBuffer[sizeof(Frame) - 1]) { _crcErrorCount++; return; }
+    _packetCount++;
+    _handle(reinterpret_cast<const Frame*>(_frameBuffer));
   }
 
   // Distance of one bin in mm, 0 = no (reliable) return.
-  uint16_t distanceMm(int bin) const {
-    const Bin& b = _bins[((bin % 360) + 360) % 360];
-    uint32_t now = millis();
-    uint16_t v[3];
-    int n = 0;
+  uint16_t distanceMm(int binIndex) const {
+    const Bin& binData = _bins[((binIndex % 360) + 360) % 360];
+    uint32_t nowMs = millis();
+    uint16_t validMm[3];
+    int validCount = 0;
     for (int k = 0; k < 3; k++)
-      if (b.mm[k] && now - b.ms[k] <= _cfg.expireMs) v[n++] = b.mm[k];
-    if (n < 2) return 0;
-    if (n == 2) return (v[0] + v[1]) / 2;
-    if (v[0] > v[1]) { uint16_t t = v[0]; v[0] = v[1]; v[1] = t; }  // median of 3
-    if (v[1] > v[2]) { v[1] = v[2]; }
-    return v[0] > v[1] ? v[0] : v[1];
+      if (binData.hitMm[k] && nowMs - binData.hitMs[k] <= _config.expireMs) validMm[validCount++] = binData.hitMm[k];
+    if (validCount < 2) return 0;
+    if (validCount == 2) return (validMm[0] + validMm[1]) / 2;
+    if (validMm[0] > validMm[1]) { uint16_t swap = validMm[0]; validMm[0] = validMm[1]; validMm[1] = swap; }  // median of 3
+    if (validMm[1] > validMm[2]) { validMm[1] = validMm[2]; }
+    return validMm[0] > validMm[1] ? validMm[0] : validMm[1];
   }
 
-  uint32_t packets() const { return _packets; }  // valid frames since start
+  uint32_t packets() const { return _packetCount; }  // valid frames since start
   float crcErrorPct() const {                     // share of frames with a wrong checksum
-    uint32_t t = _packets + _crcErrors;
-    return t ? 100.0f * _crcErrors / t : 0;
+    uint32_t totalFrames = _packetCount + _crcErrorCount;
+    return totalFrames ? 100.0f * _crcErrorCount / totalFrames : 0;
   }
 
 private:
-  struct __attribute__((packed)) Pt { uint16_t dist; uint8_t inten; };
+  struct __attribute__((packed)) Pt { uint16_t distanceMm; uint8_t intensity; };
   struct __attribute__((packed)) Frame {
-    uint8_t header, verLen; uint16_t speed, startAngle; Pt p[12]; uint16_t endAngle, ts; uint8_t crc;
+    uint8_t header, verLen; uint16_t speed, startAngleCentiDeg; Pt points[12]; uint16_t endAngleCentiDeg, timestamp; uint8_t crc;
   };
-  struct Bin { uint16_t mm[3] = {0, 0, 0}; uint32_t ms[3] = {0, 0, 0}; uint8_t head = 0; };
+  struct Bin { uint16_t hitMm[3] = {0, 0, 0}; uint32_t hitMs[3] = {0, 0, 0}; uint8_t nextSlot = 0; };
 
   // Spreads the 12 points between start and end angle and stores the valid ones.
-  void _handle(const Frame* f) {
-    float a0 = f->startAngle / 100.0f, a1 = f->endAngle / 100.0f;
-    if (a1 < a0) a1 += 360;
-    float step = (a1 - a0) / 11;
-    uint32_t now = millis();
+  void _handle(const Frame* frame) {
+    float startAngleDeg = frame->startAngleCentiDeg / 100.0f, endAngleDeg = frame->endAngleCentiDeg / 100.0f;
+    if (endAngleDeg < startAngleDeg) endAngleDeg += 360;
+    float stepDeg = (endAngleDeg - startAngleDeg) / 11;
+    uint32_t nowMs = millis();
     for (int k = 0; k < 12; k++) {
-      uint16_t d = f->p[k].dist;
-      if (d < _cfg.minMm || d >= _cfg.maxMm) continue;  // no return / too close: no change
-      int bin = ((int)lroundf(a0 + step * k) + _cfg.angleShiftDeg) % 360;
-      Bin& b = _bins[bin];
-      b.mm[b.head] = d;
-      b.ms[b.head] = now;
-      b.head = (b.head + 1) % 3;
+      uint16_t pointMm = frame->points[k].distanceMm;
+      if (pointMm < _config.minMm || pointMm >= _config.maxMm) continue;  // no return / too close: no change
+      int binIndex = ((int)lroundf(startAngleDeg + stepDeg * k) + _config.angleShiftDeg) % 360;
+      Bin& binData = _bins[binIndex];
+      binData.hitMm[binData.nextSlot] = pointMm;
+      binData.hitMs[binData.nextSlot] = nowMs;
+      binData.nextSlot = (binData.nextSlot + 1) % 3;
     }
   }
 
-  Config _cfg;
+  Config _config;
   HardwareSerial* _port = nullptr;
-  uint8_t _crcTab[256];
-  uint8_t _buf[sizeof(Frame)];
-  uint8_t _idx = 0;
-  uint32_t _packets = 0, _crcErrors = 0;
+  uint8_t _crcTable[256];
+  uint8_t _frameBuffer[sizeof(Frame)];
+  uint8_t _frameIndex = 0;
+  uint32_t _packetCount = 0, _crcErrorCount = 0;
   Bin _bins[360];
 };

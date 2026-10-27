@@ -36,11 +36,16 @@
 | `src/comms/WebHMI.*` | Wi-Fi AP + async web server + phone page | server task |
 | `src/comms/RoverLink.*` | HTTP commands to the rover, deadman, voltage poll | core 0 task |
 | `src/core/Logger.*` | timeline CSV on LittleFS, `/log` download | core 1 + flush task |
-| *(planned)* `Brain.*` | state machine: manual → assisted → autonomous per checkpoint | core 1 |
+| `src/nav/Navigator.*` | autonomous run: run state, phases, heading hold, turn ([autonomous_run.md](autonomous_run.md)) | core 1, control step |
+| `src/nav/LineTracker.*` | odometry, virtual line, pole counting, wall alignment | core 1 |
+| `src/nav/SafetyMonitor.*` | obstacle pause, cliff check | core 1 |
+| `src/nav/Perception.*` | pole / wall / lane detection from one LiDAR scan | core 1 |
+| `src/nav/NavConfig.h`, `NavMath.*` | run tuning; geometry helpers | – |
 
 Rule: `loop()` must stay fast (the starter reports avg/max loop time every 10 s). Anything that
-blocks longer than a few ms goes into its own FreeRTOS task on core 0, as `UsManager` and
-`RoverLink` already do.
+blocks longer than a few ms goes into its own FreeRTOS task on core 0, as `UsManager`,
+`RoverLink` and the Logger's flush task already do. The web server task never touches a sensor
+or the run state: buttons are queued as commands and executed in `loop()`.
 
 ## Phases
 
@@ -57,11 +62,15 @@ Each phase ends with a `drive-YYYY-MM-DD` tag and a row in the test log (`04_SAF
 ## Data flow for a decision
 
 ```
-sensors.update()  →  snapshot (us[5], lidar[90], yaw/pitch/roll, gps)
-                  →  Brain::decide(snapshot, state)  →  (l, r, state')
-                  →  rover.setDrive(l, r)
-                  →  Logger::row(t, snapshot, l, r, state)   // same tick, same numbers
+every ROVER_PERIOD_MS (100 ms, fixed grid):
+sensors (live: IMU 20 ms, ultrasonic task, LiDAR 1° map)
+                  →  Navigator::step(sensors, stepS, pageAgeMs)  →  (driveLeft, driveRight), phase, events
+                       Perception → LineTracker / SafetyMonitor → heading PID / turn
+                  →  drive pad instead, if no run (or the pad overrides the run)
+                  →  roverLink.setDrive(driveLeft, driveRight)
+                  →  Logger::row(timestampMs, same inputs, driveLeft, driveRight, phase, events)   // same tick, same numbers
 ```
 
-The log row is written from the same snapshot the decision used, so the post-drive plot shows
-exactly what the brain saw, not what the phone page happened to poll.
+The log row is written from the same values the decision used, so the post-drive plot shows
+exactly what the run saw, not what the phone page happened to poll (the page gets a 4 Hz
+snapshot).

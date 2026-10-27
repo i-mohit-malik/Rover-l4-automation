@@ -1,8 +1,9 @@
 #include "WebHMI.h"
 #include "../core/Logger.h"
+#include <Update.h>
 
 // ---------------------------------------------------------------------------------------------
-// The web page. %TITLE% and %MAXSPD% are filled in by _buildPage().
+// The web page. %TITLE%, %MAXSPD% and %FW% are filled in by _buildPage().
 // ---------------------------------------------------------------------------------------------
 static const char kPage[] PROGMEM = R"rawpage(<!doctype html><html><head><meta charset='utf-8'>
 <meta name='viewport' content='width=device-width, initial-scale=1'><title>%TITLE%</title>
@@ -31,11 +32,25 @@ input[type=range]{width:100%;}
 .table td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);}
 .k{color:var(--muted);}
 canvas{display:block;margin:0 auto;max-width:100%;}
+.badge{display:block;text-align:center;font-weight:700;padding:10px;border-radius:12px;margin:4px 0 10px;}
+.b-idle{background:#334155;color:#cbd5e1;}.b-run{background:#16a34a;color:#fff;}
+.b-pause{background:#d97706;color:#fff;}.b-stop{background:#dc2626;color:#fff;}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}.row2 button{padding:14px;font-size:15px;}
+.go{background:linear-gradient(180deg,rgba(16,185,129,.95),rgba(16,185,129,.75));color:#03140d;}
+.lost{background:#7f1d1d;border:1px solid #ef4444;text-align:center;font-weight:700;}
+a{color:var(--acc);}
 </style></head><body><div class='wrap'>
 <div class='top'><div class='title'>%TITLE%</div><div class='pill' id='conn'>-</div>
  <button id='devBtn' class='btnTiny'>Dev</button></div>
+<div class='card lost hidden' id='lost'>&#9888; No connection to the box - values are frozen, a run stops after 3 s</div>
 <div class='card'><div class='label'>State</div><div class='value' id='state'>-</div></div>
-<div class='card hidden' id='driveCard'><div class='sectionTitle'>Drive (hold a key)</div>
+<div class='card'><div class='sectionTitle'>Autonomous run (pole row, turn right)</div>
+ <div class='badge b-idle' id='runBadge'>-</div>
+ <div class='row2'><button class='go' onclick="cmd('/run/start')">&#9654; Start run</button><button class='stop' onclick="cmd('/run/stop')">&#9632; Stop run</button></div>
+ <div class='row2'><button id='safBtn' onclick="cmd('/run/safety')">Safety stops</button><button onclick="cmd('/imu/save')">Save IMU calibration</button></div>
+ <table class='table' id='runTable'></table>
+ <div class='label' id='msg'></div><div class='label'>%FW%</div></div>
+<div class='card hidden' id='driveCard'><div class='sectionTitle'>Drive (hold a key; a key also ends an autonomous run)</div>
  <div class='pad'>
   <span></span><button data-d='f'>&#9650;</button><span></span>
   <button data-d='l'>&#9664;</button><button class='stop' data-d='s'>&#9632;</button><button data-d='r'>&#9654;</button>
@@ -57,6 +72,9 @@ const MAX_SPEED=%MAXSPD%, ENV_MAX_CM=300;
 const $=id=>document.getElementById(id);
 const esc=s=>(''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
+// ---- run card buttons: the box queues them, the result shows in the message line
+function cmd(p){fetch(p).catch(()=>{});}
+
 // ---- "Dev" view toggle
 let dev=false;
 $('devBtn').onclick=()=>{dev=!dev;$('devRoot').classList.toggle('hidden',!dev);$('devBtn').textContent=dev?'Hide':'Dev';};
@@ -70,7 +88,7 @@ function drvSend(l,r){seq++;fetch('/drive?l='+l.toFixed(2)+'&r='+r.toFixed(2)+'&
 function drvClear(){clearInterval(drvTimer);drvTimer=null;drv=null;if(drvBtn){drvBtn.classList.remove('on');drvBtn=null;}}
 function drvStop(){drvClear();drvSend(0,0);}
 function drvStart(b){
-  if(b.dataset.d==='s'){drvStop();return;}
+  if(b.dataset.d==='s'){drvStop();cmd('/run/stop');return;}
   const s=parseFloat($('spd').value);
   const m={f:[s,s],b:[-s,-s],l:[-s,s],r:[s,-s]}[b.dataset.d];
   drvClear();  // switching keys: no stop in between, the new command follows directly
@@ -122,6 +140,8 @@ function renderSensors(s){
   // ISO 8855: roll + = right side down, pitch + = front down, yaw + = turning left (0 = north)
   let t=I.ok?`<tr><td class='k'>Roll / pitch / yaw (ISO 8855)</td><td>${I.roll}&deg; / ${I.pitch}&deg; / ${I.yaw}&deg;</td></tr>`
     +`<tr><td class='k'>IMU calibration sys/gyr/acc/mag</td><td>${(I.cal||[]).join(' / ')} (3 = good)</td></tr>`
+    +`<tr><td class='k'>IMU mode</td><td>${I.compass?(I.calSaved?'compass on, saved calibration loaded (levels read 0 until the rover moved)':'compass on, no saved calibration')
+      :'compass off (gyro mode): only Gyro must be 3, keep the rover still ~3 s after power-on'}</td></tr>`
     :`<tr><td class='k'>IMU</td><td>not found</td></tr>`;
   t+=G.chars?`<tr><td class='k'>GPS</td><td>${G.fix?'fix':'no fix'}, ${G.sats} satellites, HDOP ${G.hdop}</td></tr>`
     :`<tr><td class='k'>GPS</td><td>no data from the module</td></tr>`;
@@ -129,28 +149,65 @@ function renderSensors(s){
   $('navTable').innerHTML=t;
 }
 
-// ---- poll the box 4 times per second
+// ---- run card
+function renderRun(R,I){
+  if(!R)return;
+  const b=$('runBadge');
+  b.className='badge '+(R.state==='RUNNING'?(R.paused?'b-pause':'b-run'):(R.state==='STOPPED'?'b-stop':'b-idle'));
+  b.textContent=(R.state==='RUNNING'&&!R.paused)?String.fromCharCode(9654)+' '+R.nav:R.text;
+  const sb=$('safBtn');sb.textContent='Safety stops: '+(R.safety?'ON':'OFF');sb.style.background=R.safety?'':'#d97706';
+  const w=R.wall?`${R.wall} cm / ${R.wallDeg}&deg;${R.wallSteer?' (steering)':''}`:'-';
+  const rows=[['Poles passed',R.poles+' / '+R.polesTarget],['Run time',R.elapsedS+' s'],
+    ['Turn rate',(I&&I.ok)?I.rate+' &deg;/s':'-'],['Heading ref / cross-track',R.headingRef+'&deg; / '+R.crossTrack+' cm'],
+    ['Lane check ahead',R.front?R.front+' cm':'clear'],['Left wall',w]];
+  $('runTable').innerHTML=rows.map(r=>`<tr><td class='k'>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
+}
+
+// ---- poll the box 4 times per second; one request at a time (a dead link often hangs instead of
+//      failing, so requests would pile up), banner when the box has not answered for 1 s
+let lastOk=Date.now(),busy=false;
 async function poll(){
+  if(busy)return;
+  busy=true;
+  const ctl=new AbortController(),t=setTimeout(()=>ctl.abort(),1000);
   try{
-    const j=await (await fetch('/values',{cache:'no-store'})).json();
+    const j=await (await fetch('/values',{cache:'no-store',signal:ctl.signal})).json();
+    lastOk=Date.now();
     $('conn').textContent='Online';
     $('state').textContent=j.state||'-';
     renderSensors(j.sensors);
+    renderRun(j.run,j.sensors&&j.sensors.imu);
+    $('msg').textContent=j.msg||'';
     if(dev){
       $('valTable').innerHTML=(j.values||[]).map(v=>`<tr><td class='k'>${esc(v.name)}</td><td>${esc(v.value)}</td></tr>`).join('');
       const c=j.cycle||{};$('cycle').textContent=`${c.min} / ${c.avg} / ${c.max} ms`;
     }
   }catch(e){$('conn').textContent='Offline';}
+  finally{clearTimeout(t);busy=false;}
 }
 setInterval(poll,250);poll();
+setInterval(()=>{$('lost').classList.toggle('hidden',Date.now()-lastOk<=1000);},250);
 </script></body></html>)rawpage";
 
+// Firmware update page. %FW% = running version.
+static const char kUpdatePage[] PROGMEM = R"rawpage(<!doctype html><html><head><meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'><title>Firmware update</title>
+<style>body{font-family:system-ui,sans-serif;background:#0b0f17;color:#e7edf5;padding:16px}
+input,button{font-size:16px;margin:8px 0;width:100%}button{padding:14px;border:0;border-radius:12px;background:#4ea1ff;color:#04101f;font-weight:700}
+p{color:#9aa4b2}a{color:#4ea1ff}</style></head><body>
+<h2>Firmware update over Wi-Fi</h2><p>Running: %FW%</p>
+<p>Arduino IDE: Sketch &rarr; Export Compiled Binary, then choose <b>box.ino.bin</b> (not .merged.bin /
+.bootloader.bin). Stop the run first. The box restarts when done (also after a failed upload).</p>
+<form method='POST' action='/update' enctype='multipart/form-data'>
+<input type='file' name='firmware' accept='.bin'><button type='submit'>Upload &amp; restart</button></form>
+<p><a href='/'>Back</a></p></body></html>)rawpage";
+
 // Appends s to out as JSON string content (quotes and backslashes escaped, control chars dropped).
-static void jsonEscape(String& out, const char* s) {
-  for (; *s; ++s) {
-    const char c = *s;
-    if (c == '"' || c == '\\') { out += '\\'; out += c; }
-    else if ((uint8_t)c >= 0x20) out += c;
+static void jsonEscape(String& output, const char* text) {
+  for (; *text; ++text) {
+    const char character = *text;
+    if (character == '"' || character == '\\') { output += '\\'; output += character; }
+    else if ((uint8_t)character >= 0x20) output += character;
   }
 }
 
@@ -158,18 +215,19 @@ static void jsonEscape(String& out, const char* s) {
 
 // Takes the mutex; creates it on first use (always in setup(), before the server task runs).
 void WebHMI::_lock() {
-  if (!_mtx) _mtx = xSemaphoreCreateMutex();
-  xSemaphoreTake(_mtx, portMAX_DELAY);
+  if (!_dataMutex) _dataMutex = xSemaphoreCreateMutex();
+  xSemaphoreTake(_dataMutex, portMAX_DELAY);
 }
 
-void WebHMI::begin(const char* ssid, const char* pass, IPAddress ip, uint8_t channel) {
+void WebHMI::begin(const char* ssid, const char* password, IPAddress ip, uint8_t channel) {
   _lock();  // make sure the mutex exists before the server starts
-  xSemaphoreGive(_mtx);
+  xSemaphoreGive(_dataMutex);
+  if (!_commandQueue) _commandQueue = xQueueCreate(8, sizeof(uint8_t));
 
   WiFi.mode(WIFI_AP);
   WiFi.setSleep(false);                                  // no Wi-Fi power save on the box
   WiFi.softAPConfig(ip, ip, IPAddress(255, 255, 255, 0));
-  if (WiFi.softAP(ssid, pass, channel)) {
+  if (WiFi.softAP(ssid, password, channel)) {
     Serial.printf("[WebHMI] AP %s, channel %d, IP %s\n", ssid, WiFi.channel(),
                   WiFi.softAPIP().toString().c_str());
   } else {
@@ -177,60 +235,141 @@ void WebHMI::begin(const char* ssid, const char* pass, IPAddress ip, uint8_t cha
   }
 
   _server = new AsyncWebServer(80);
-  _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* req) {
-    req->send(200, "text/html; charset=utf-8", _buildPage());
+  _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    request->send(200, "text/html; charset=utf-8", _buildPage());
   });
-  _server->on("/values", HTTP_GET, [this](AsyncWebServerRequest* req) {
-    req->send(200, "application/json", _buildJson());
+  _server->on("/values", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    _lastPollMs = millis();  // the page is alive: feeds the link watchdog of the run
+    request->send(200, "application/json", _buildJson());
   });
-  _server->on("/drive", HTTP_GET, [this](AsyncWebServerRequest* req) {
-    if (!req->hasParam("l") || !req->hasParam("r") || !req->hasParam("id") || !req->hasParam("n")) {
-      req->send(400, "application/json", "{\"ok\":false}");
+  _server->on("/drive", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    if (!request->hasParam("l") || !request->hasParam("r") || !request->hasParam("id") || !request->hasParam("n")) {
+      request->send(400, "application/json", "{\"ok\":false}");
       return;
     }
-    const float l = constrain(req->getParam("l")->value().toFloat(), -_driveMax, _driveMax);
-    const float r = constrain(req->getParam("r")->value().toFloat(), -_driveMax, _driveMax);
-    const uint32_t id = strtoul(req->getParam("id")->value().c_str(), nullptr, 10);
-    const uint32_t n = strtoul(req->getParam("n")->value().c_str(), nullptr, 10);
-    bool fresh;
+    const float left = constrain(request->getParam("l")->value().toFloat(), -_driveMaxSpeed, _driveMaxSpeed);
+    const float right = constrain(request->getParam("r")->value().toFloat(), -_driveMaxSpeed, _driveMaxSpeed);
+    const uint32_t pageId = strtoul(request->getParam("id")->value().c_str(), nullptr, 10);
+    const uint32_t sequence = strtoul(request->getParam("n")->value().c_str(), nullptr, 10);
+    bool isFresh;
     portENTER_CRITICAL(&_driveMux);
     // a new page (id) starts over; within a page only a higher number counts
-    fresh = (id != _drivePageId) || (n > _driveSeq);
-    if (fresh) {
-      _drivePageId = id;
-      _driveSeq = n;
-      _driveL = l;
-      _driveR = r;
-      _driveMs = millis();
+    isFresh = (pageId != _drivePageId) || (sequence > _driveSequence);
+    if (isFresh) {
+      _drivePageId = pageId;
+      _driveSequence = sequence;
+      _driveLeft = left;
+      _driveRight = right;
+      _driveReceivedMs = millis();
     }
     portEXIT_CRITICAL(&_driveMux);
-    req->send(200, "application/json", fresh ? "{\"ok\":true}" : "{\"ok\":false,\"stale\":true}");
+    request->send(200, "application/json", isFresh ? "{\"ok\":true}" : "{\"ok\":false,\"stale\":true}");
   });
   if (_logger) {
-    _server->on("/log", HTTP_GET, [this](AsyncWebServerRequest* req) { _handleLog(req); });
+    _server->on("/log", HTTP_GET, [this](AsyncWebServerRequest* request) { _handleLog(request); });
+  }
+  _server->on("/run/start", HTTP_GET, [this](AsyncWebServerRequest* request) { _queueCommand(request, CMD_RUN_START); });
+  _server->on("/run/stop", HTTP_GET, [this](AsyncWebServerRequest* request) { _queueCommand(request, CMD_RUN_STOP); });
+  _server->on("/run/safety", HTTP_GET, [this](AsyncWebServerRequest* request) { _queueCommand(request, CMD_SAFETY_TOGGLE); });
+  _server->on("/imu/save", HTTP_GET, [this](AsyncWebServerRequest* request) { _queueCommand(request, CMD_IMU_SAVE); });
+  if (_otaEnabled) {
+    _server->on("/update", HTTP_GET, [this](AsyncWebServerRequest* request) {
+      String updatePage = FPSTR(kUpdatePage);
+      updatePage.replace("%FW%", _firmwareVersion);
+      request->send(200, "text/html; charset=utf-8", updatePage);
+    });
+    _server->on("/update", HTTP_POST,
+      [this](AsyncWebServerRequest* request) {  // after the upload
+        if (request != _otaRequest) {
+          request->send(409, "text/plain", _otaActive ? "Another update is running." : "Refused: stop the run first.");
+          return;
+        }
+        const bool isUploadOk = Update.isFinished() && !Update.hasError();
+        request->send(200, "text/plain", isUploadOk ? String("Update OK - restarting. Reconnect to the Wi-Fi in ~10 s.")
+                                        : String("Update FAILED: ") + Update.errorString() + " - restarting with the old firmware.");
+        _restartAtMs = (millis() + 800) | 1;  // let the answer go out; restart after any attempt
+      },
+      [this](AsyncWebServerRequest* request, const String& fileName, size_t offset, uint8_t* data, size_t length, bool isFinal) {
+        _handleUpload(request, fileName, offset, data, length, isFinal);
+      });
   }
   _server->begin();
   _cycleLastUs = micros();
-  _cycleWinMs = millis();
+  _cycleWindowStartMs = millis();
 }
 
 void WebHMI::setTitle(const String& title) { _title = title; }
 
+void WebHMI::setRunJson(const String& json) {
+  _lock();
+  _runJson = json;
+  xSemaphoreGive(_dataMutex);
+}
+
+void WebHMI::setMessage(const String& text) {
+  _lock();
+  _message = text;
+  xSemaphoreGive(_dataMutex);
+}
+
+uint32_t WebHMI::pageAgeMs() const {
+  const uint32_t lastPollMs = _lastPollMs;
+  return lastPollMs ? millis() - lastPollMs : UINT32_MAX;  // millis() read after t: never negative
+}
+
+bool WebHMI::takeCommand(Command& command) {
+  uint8_t commandByte;
+  if (!_commandQueue || xQueueReceive(_commandQueue, &commandByte, 0) != pdTRUE) return false;
+  command = (Command)commandByte;
+  return true;
+}
+
+void WebHMI::_queueCommand(AsyncWebServerRequest* request, Command command) {
+  const uint8_t commandByte = command;
+  const bool isQueued = _commandQueue && xQueueSend(_commandQueue, &commandByte, 0) == pdTRUE;
+  request->send(isQueued ? 200 : 503, "text/plain", isQueued ? "queued" : "busy");
+}
+
+// Upload chunks (server task). One upload at a time, refused while a run is active
+// (setUpdateAllowed). The ultrasonic task is suspended and the rover stopped by loop() as soon as
+// updateActive() is true.
+void WebHMI::_handleUpload(AsyncWebServerRequest* request, const String& fileName, size_t offset, uint8_t* data,
+                           size_t length, bool isFinal) {
+  if (offset == 0) {
+    if (_otaRequest || !_otaAllowed) {
+      Serial.println("[ota] upload refused");
+      return;
+    }
+    _otaRequest = request;
+    _otaActive = true;
+    _otaLastDataMs = millis();
+    Serial.printf("[ota] receiving %s, free heap %u\n", fileName.c_str(), ESP.getFreeHeap());
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+  }
+  if (request != _otaRequest) return;
+  _otaLastDataMs = millis();
+  if (length && Update.write(data, length) != length) Update.printError(Serial);
+  if (isFinal) {
+    if (Update.end(true)) Serial.printf("[ota] done, %u bytes\n", (unsigned)(offset + length));
+    else Update.printError(Serial);
+  }
+}
+
 void WebHMI::enableDrivePad(float maxSpeed) {
-  _drivePad = true;
-  _driveMax = maxSpeed;
+  _isDrivePadEnabled = true;
+  _driveMaxSpeed = maxSpeed;
 }
 
 void WebHMI::setStateText(const String& text) {
   _lock();
   _state = text;
-  xSemaphoreGive(_mtx);
+  xSemaphoreGive(_dataMutex);
 }
 
 void WebHMI::setSensorJson(const String& json) {
   _lock();
   _sensorJson = json;
-  xSemaphoreGive(_mtx);
+  xSemaphoreGive(_dataMutex);
 }
 
 void WebHMI::showValue(const char* name, double value) { _setValue(name, String(value, 3)); }
@@ -240,9 +379,9 @@ void WebHMI::showValue(const char* name, const String& value) { _setValue(name, 
 void WebHMI::_setValue(const char* name, const String& text) {
   _lock();
   Value* slot = nullptr;
-  for (Value& v : _values) {
-    if (v.inUse && strncmp(v.name, name, sizeof(v.name)) == 0) { slot = &v; break; }
-    if (!v.inUse && !slot) slot = &v;
+  for (Value& value : _values) {
+    if (value.inUse && strncmp(value.name, name, sizeof(value.name)) == 0) { slot = &value; break; }
+    if (!value.inUse && !slot) slot = &value;
   }
   if (slot) {
     if (!slot->inUse) {
@@ -251,36 +390,49 @@ void WebHMI::_setValue(const char* name, const String& text) {
     }
     strlcpy(slot->text, text.c_str(), sizeof(slot->text));
   }
-  xSemaphoreGive(_mtx);
+  xSemaphoreGive(_dataMutex);
 }
 
-void WebHMI::getDrive(float& left, float& right, uint32_t& ageMs) const {
+void WebHMI::getDrive(float& left, float& right, uint32_t& commandAgeMs) const {
   portENTER_CRITICAL(&_driveMux);
-  left = _driveL;
-  right = _driveR;
-  const uint32_t ms = _driveMs;
+  left = _driveLeft;
+  right = _driveRight;
+  const uint32_t receivedMs = _driveReceivedMs;
   portEXIT_CRITICAL(&_driveMux);
-  ageMs = ms ? millis() - ms : UINT32_MAX;  // millis() read after ms: never negative
+  commandAgeMs = receivedMs ? millis() - receivedMs : UINT32_MAX;  // millis() read after ms: never negative
 }
 
 // Loop time over 1 s windows: min / average / max time between two tick() calls.
 void WebHMI::tick() {
+  const uint32_t restartAtMs = _restartAtMs;
+  if (restartAtMs && (int32_t)(millis() - restartAtMs) >= 0) {
+    Serial.println("[ota] restarting");
+    delay(100);
+    ESP.restart();
+  }
+  if (_otaActive && !restartAtMs && millis() - _otaLastDataMs > 15000) {  // upload stalled (connection lost)
+    Update.abort();
+    Serial.println("[ota] upload stalled, restarting with the old firmware");
+    delay(100);
+    ESP.restart();
+  }
+
   const uint32_t nowUs = micros();
-  const uint32_t dt = nowUs - _cycleLastUs;
+  const uint32_t cycleUs = nowUs - _cycleLastUs;
   _cycleLastUs = nowUs;
-  if (_cycleCount == 0 || dt < _cycleMinUs) _cycleMinUs = dt;
-  if (dt > _cycleMaxUs) _cycleMaxUs = dt;
-  _cycleSumUs += dt;
+  if (_cycleCount == 0 || cycleUs < _cycleMinUs) _cycleMinUs = cycleUs;
+  if (cycleUs > _cycleMaxUs) _cycleMaxUs = cycleUs;
+  _cycleSumUs += cycleUs;
   _cycleCount++;
 
   const uint32_t nowMs = millis();
-  if (nowMs - _cycleWinMs < 1000) return;
-  _cycleWinMs = nowMs;
+  if (nowMs - _cycleWindowStartMs < 1000) return;
+  _cycleWindowStartMs = nowMs;
   _lock();
   _cycleMinMs = _cycleMinUs / 1000.0f;
   _cycleMaxMs = _cycleMaxUs / 1000.0f;
   _cycleAvgMs = _cycleSumUs / 1000.0f / _cycleCount;
-  xSemaphoreGive(_mtx);
+  xSemaphoreGive(_dataMutex);
   _cycleCount = 0;
   _cycleSumUs = 0;
   _cycleMaxUs = 0;
@@ -289,40 +441,50 @@ void WebHMI::tick() {
 String WebHMI::_buildPage() const {
   String page = FPSTR(kPage);
   page.replace("%TITLE%", _title);
-  page.replace("%MAXSPD%", _drivePad ? String(_driveMax, 2) : String("0"));
+  page.replace("%MAXSPD%", _isDrivePadEnabled ? String(_driveMaxSpeed, 2) : String("0"));
+  String firmwareLine = String("firmware ") + _firmwareVersion;
+  if (_otaEnabled) firmwareLine += " &middot; <a href='/update'>update over Wi-Fi</a>";
+  page.replace("%FW%", firmwareLine);
   return page;
 }
 
-// {"state":"..","values":[{"name":..,"value":..}],"cycle":{min,avg,max},"sensors":{..}|null}
+// {"state":"..","values":[{"name":..,"value":..}],"cycle":{min,avg,max},"sensors":{..}|null,
+//  "run":{..}|null,"msg":"..","fw":".."}
 String WebHMI::_buildJson() const {
-  String out;
-  out.reserve(1200);
-  xSemaphoreTake(_mtx, portMAX_DELAY);
-  out += "{\"state\":\"";
-  jsonEscape(out, _state.c_str());
-  out += "\",\"values\":[";
-  bool first = true;
-  for (const Value& v : _values) {
-    if (!v.inUse) continue;
-    if (!first) out += ',';
-    first = false;
-    out += "{\"name\":\"";
-    jsonEscape(out, v.name);
-    out += "\",\"value\":\"";
-    jsonEscape(out, v.text);
-    out += "\"}";
+  String json;
+  json.reserve(1700);
+  xSemaphoreTake(_dataMutex, portMAX_DELAY);
+  json += "{\"state\":\"";
+  jsonEscape(json, _state.c_str());
+  json += "\",\"values\":[";
+  bool isFirst = true;
+  for (const Value& value : _values) {
+    if (!value.inUse) continue;
+    if (!isFirst) json += ',';
+    isFirst = false;
+    json += "{\"name\":\"";
+    jsonEscape(json, value.name);
+    json += "\",\"value\":\"";
+    jsonEscape(json, value.text);
+    json += "\"}";
   }
-  out += "],\"cycle\":{\"min\":";
-  out += String(_cycleMinMs, 2);
-  out += ",\"avg\":";
-  out += String(_cycleAvgMs, 2);
-  out += ",\"max\":";
-  out += String(_cycleMaxMs, 2);
-  out += "},\"sensors\":";
-  out += _sensorJson.length() ? _sensorJson : String("null");
-  out += '}';
-  xSemaphoreGive(_mtx);
-  return out;
+  json += "],\"cycle\":{\"min\":";
+  json += String(_cycleMinMs, 2);
+  json += ",\"avg\":";
+  json += String(_cycleAvgMs, 2);
+  json += ",\"max\":";
+  json += String(_cycleMaxMs, 2);
+  json += "},\"sensors\":";
+  json += _sensorJson.length() ? _sensorJson : String("null");
+  json += ",\"run\":";
+  json += _runJson.length() ? _runJson : String("null");
+  json += ",\"msg\":\"";
+  jsonEscape(json, _message.c_str());
+  json += "\",\"fw\":\"";
+  jsonEscape(json, _firmwareVersion);
+  json += "\"}";
+  xSemaphoreGive(_dataMutex);
+  return json;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -330,81 +492,90 @@ String WebHMI::_buildJson() const {
 // Logger's own mutex (files(), readChunk(), clear()), mark() only takes its spinlock.
 // ---------------------------------------------------------------------------------------------
 
-void WebHMI::_handleLog(AsyncWebServerRequest* req) {
-  if (req->hasParam("get")) {
-    const String name = req->getParam("get")->value();
-    if (!Logger::validName(name.c_str())) {
-      req->send(400, "text/plain", "bad file name");
+void WebHMI::_handleLog(AsyncWebServerRequest* request) {
+  // during an autonomous run the log is in RAM and the flash stays untouched (a flash read also
+  // freezes both cores): downloads and clear wait until the run is written
+  const bool isFlashBlocked = _logger->isRunActive() || _logger->isRunWritePending();
+  if (isFlashBlocked && (request->hasParam("get") || request->hasParam("clear"))) {
+    request->send(409, "text/plain", "Autonomous run: the log is written after the run. Try again then.");
+    return;
+  }
+  if (request->hasParam("get")) {
+    const String fileName = request->getParam("get")->value();
+    if (!Logger::validName(fileName.c_str())) {
+      request->send(400, "text/plain", "bad file name");
       return;
     }
     // size from the listing; the current file may grow meanwhile, the download ends at this size
-    Logger::FileInfo list[Logger::kMaxFiles];
-    const uint8_t n = _logger->files(list, Logger::kMaxFiles);
-    size_t size = 0;
-    bool found = false;
-    for (uint8_t i = 0; i < n && !found; i++) {
-      if (name == list[i].name) { size = list[i].size; found = true; }
+    Logger::FileInfo fileList[Logger::kMaxFiles];
+    const uint8_t fileCount = _logger->files(fileList, Logger::kMaxFiles);
+    size_t fileSize = 0;
+    bool isFound = false;
+    for (uint8_t i = 0; i < fileCount && !isFound; i++) {
+      if (fileName == fileList[i].name) { fileSize = fileList[i].size; isFound = true; }
     }
-    if (!found) {
-      req->send(404, "text/plain", "no such log file");
+    if (!isFound) {
+      request->send(404, "text/plain", "no such log file");
       return;
     }
     Logger* logger = _logger;
-    AsyncWebServerResponse* res = req->beginResponse(
-        "text/csv", size, [logger, name, size](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
-          if (index >= size) return 0;
-          if (maxLen > size - index) maxLen = size - index;
-          const size_t got = logger->readChunk(name.c_str(), buf, maxLen, index);
-          return got == (size_t)-1 ? RESPONSE_TRY_AGAIN : got;  // flash busy: the server retries
+    AsyncWebServerResponse* response = request->beginResponse(
+        "text/csv", fileSize, [logger, fileName, fileSize](uint8_t* buffer, size_t maxLength, size_t offset) -> size_t {
+          if (offset >= fileSize) return 0;
+          if (maxLength > fileSize - offset) maxLength = fileSize - offset;
+          const size_t bytesRead = logger->readChunk(fileName.c_str(), buffer, maxLength, offset);
+          return bytesRead == (size_t)-1 ? RESPONSE_TRY_AGAIN : bytesRead;  // flash busy: the server retries
         });
-    res->addHeader("Content-Disposition", String("attachment; filename=\"") + name + "\"");
-    req->send(res);
+    response->addHeader("Content-Disposition", String("attachment; filename=\"") + fileName + "\"");
+    request->send(response);
     return;
   }
-  if (req->hasParam("clear")) {
-    const bool ok = _logger->clear();
-    req->send(ok ? 200 : 503, "text/plain", ok ? "cleared" : "clear failed (flash busy or no filesystem)");
+  if (request->hasParam("clear")) {
+    const bool isCleared = _logger->clear();
+    request->send(isCleared ? 200 : 503, "text/plain", isCleared ? "cleared" : "clear failed (flash busy or no filesystem)");
     return;
   }
-  if (req->hasParam("mark")) {
-    _logger->mark(req->getParam("mark")->value().c_str());
-    req->send(200, "text/plain", "marked");
+  if (request->hasParam("mark")) {
+    _logger->mark(request->getParam("mark")->value().c_str());
+    request->send(200, "text/plain", "marked");
     return;
   }
-  req->send(200, "text/html; charset=utf-8", _buildLogPage());
+  request->send(200, "text/html; charset=utf-8", _buildLogPage());
 }
 
 // Log page: status, files (newest last, each a download link), mark field, clear button.
 String WebHMI::_buildLogPage() {
-  Logger::FileInfo list[Logger::kMaxFiles];
-  const uint8_t n = _logger->files(list, Logger::kMaxFiles);
-  String out;
-  out.reserve(1500 + n * 120);
-  out += F("<!doctype html><html><head><meta charset='utf-8'>"
+  Logger::FileInfo fileList[Logger::kMaxFiles];
+  const bool isFlashBlocked = _logger->isRunActive() || _logger->isRunWritePending();
+  const uint8_t fileCount = isFlashBlocked ? 0 : _logger->files(fileList, Logger::kMaxFiles);
+  String html;
+  html.reserve(1500 + fileCount * 120);
+  html += F("<!doctype html><html><head><meta charset='utf-8'>"
            "<meta name='viewport' content='width=device-width, initial-scale=1'><title>");
-  out += _title;
-  out += F(" log</title><style>body{margin:0;padding:16px;background:#0b0f17;color:#e7edf5;"
+  html += _title;
+  html += F(" log</title><style>body{margin:0;padding:16px;background:#0b0f17;color:#e7edf5;"
            "font-family:system-ui,sans-serif}a{color:#4ea1ff}td{padding:6px 10px}"
            "input,button{font-size:15px;padding:8px}</style></head><body><h3>");
-  out += _title;
-  out += F(" timeline log</h3><p>");
-  out += _logger->status();
-  out += F("</p><table>");
-  for (uint8_t i = 0; i < n; i++) {
-    out += F("<tr><td><a href='/log?get=");
-    out += list[i].name;  // validName(): letters, digits, '_' and '.' only
-    out += F("'>");
-    out += list[i].name;
-    out += F("</a></td><td>");
-    out += String((uint32_t)((list[i].size + 1023) / 1024));
-    out += F(" kB</td></tr>");
+  html += _title;
+  html += F(" timeline log</h3><p>");
+  html += _logger->status();
+  html += F("</p><table>");
+  for (uint8_t i = 0; i < fileCount; i++) {
+    html += F("<tr><td><a href='/log?get=");
+    html += fileList[i].name;  // validName(): letters, digits, '_' and '.' only
+    html += F("'>");
+    html += fileList[i].name;
+    html += F("</a></td><td>");
+    html += String((uint32_t)((fileList[i].size + 1023) / 1024));
+    html += F(" kB</td></tr>");
   }
-  if (!n) out += F("<tr><td>no log files</td></tr>");
-  out += F("</table><p><input id='m' maxlength='23' placeholder='note, e.g. cp1'> "
+  if (!fileCount) html += isFlashBlocked ? F("<tr><td>files are listed after the run</td></tr>")
+                                         : F("<tr><td>no log files</td></tr>");
+  html += F("</table><p><input id='m' maxlength='23' placeholder='note, e.g. cp1'> "
            "<button onclick=\"fetch('/log?mark='+encodeURIComponent(document.getElementById('m').value))"
            ".then(r=>r.text()).then(t=>{document.getElementById('m').value='';alert(t)})\">Mark</button></p>"
            "<p><button onclick=\"if(confirm('Delete all logs on the box?'))fetch('/log?clear=1')"
            ".then(r=>r.text()).then(t=>{alert(t);location.reload()})\">Clear all logs</button></p>"
            "<p><a href='/'>back</a></p></body></html>");
-  return out;
+  return html;
 }

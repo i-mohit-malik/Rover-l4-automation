@@ -22,6 +22,9 @@ public:
   // timeoutUs: longest wait for an echo (17.5 ms ~ 3 m). Call once.
   void begin(int maxDistanceCm, uint32_t timeoutUs);
 
+  // Stops the measuring task (e.g. during a firmware update, so the Wi-Fi gets all the time).
+  void suspend() { if (_taskHandle) vTaskSuspend(_taskHandle); }
+
   // Last measured distances in cm (maxDistanceCm = nothing in range)
   int readFrontCm() const { return _frontCm; }
   int readLeftCm() const { return _leftCm; }
@@ -37,7 +40,7 @@ private:
   Pins _pins;
   int _maxDistanceCm = 300;
   uint32_t _timeoutUs = 17500;
-  TaskHandle_t _task = nullptr;
+  TaskHandle_t _taskHandle = nullptr;
 
   // written by the task, read by loop(); int reads/writes are atomic on the ESP32
   volatile int _frontCm = 0, _leftCm = 0, _rightCm = 0, _backCm = 0, _frontAngledCm = 0;

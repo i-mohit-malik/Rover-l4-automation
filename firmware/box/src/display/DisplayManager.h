@@ -14,8 +14,8 @@ public:
   void show(const char* line1, const char* line2 = nullptr, const char* line3 = nullptr);
 
 private:
-  void _printLine(uint8_t index, const char* text);
+  void _printLine(uint8_t lineIndex, const char* text);
 
-  Adafruit_SSD1306 _disp;
-  bool _ready = false;
+  Adafruit_SSD1306 _oled;
+  bool _isReady = false;
 };

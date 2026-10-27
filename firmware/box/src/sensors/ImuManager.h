@@ -21,29 +21,38 @@
 class ImuManager {
 public:
   // Starts the sensor and runs the 3 s north alignment (blocking).
+  // useCompass = false: IMUPLUS mode (gyro + accel only, yaw relative to start, no alignment).
   // Returns false if the BNO055 does not answer.
-  bool begin();
+  bool begin(bool useCompass = true);
 
-  // Reads the sensor; call often, it limits itself to one read per 100 ms.
+  // Reads the sensor; call often, it limits itself to one read per 20 ms.
   void update();
 
   float yawDeg() const;                       // ISO yaw, see above
   float pitchDeg() const { return _pitchDeg; }  // ISO pitch, + = front down
   float rollDeg() const { return _rollDeg; }    // ISO roll, + = right side down
+  float yawRateDps() const { return _yawRateDps; }  // turn rate in deg/s, + = turning left
 
   // Calibration state 0 (none) .. 3 (fully calibrated): system, gyro, accel, magnetometer
-  void calibration(uint8_t& sys, uint8_t& gyro, uint8_t& accel, uint8_t& mag) const;
+  void calibration(uint8_t& systemLevel, uint8_t& gyroLevel, uint8_t& accelLevel, uint8_t& magLevel) const;
+
+  // Stores the current calibration profile in ESP32 flash; begin() loads it again at the next
+  // power-on. Only works when fully calibrated (all four levels 3). Not while driving (~50 ms).
+  bool saveCalibration();
+  bool calibrationLoaded() const { return _isCalibrationLoaded; }  // a saved profile was loaded at boot
 
 private:
   void _alignNorth(uint16_t durationMs);
+  bool _loadCalibration();
 
-  bool _ready = false;
+  bool _isReady = false;
+  bool _isCalibrationLoaded = false;
   uint32_t _lastUpdateMs = 0;
   // sensor frame: heading clockwise from north (fusion and magnetic)
   float _fusionYawDeg = 0, _magYawDeg = 0;
   // vehicle frame (ISO 8855)
-  float _pitchDeg = 0, _rollDeg = 0;
-  bool _northAnchored = false;
+  float _pitchDeg = 0, _rollDeg = 0, _yawRateDps = 0;
+  bool _isNorthAnchored = false;
   float _northOffsetDeg = 0;   // magnetic heading - fusion heading at start
-  uint8_t _cal[4] = {0, 0, 0, 0};
+  uint8_t _calibration[4] = {0, 0, 0, 0};
 };
